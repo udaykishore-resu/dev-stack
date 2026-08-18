@@ -1,0 +1,5 @@
+# 2Gi: both indices together are a few tens of MB, but ES reserves headroom
+# for merges and translog.
+- op: replace
+  path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+  value: 2Gi

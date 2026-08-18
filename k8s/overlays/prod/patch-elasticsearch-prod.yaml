@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+spec:
+  template:
+    spec:
+      containers:
+        - name: elasticsearch
+          env:
+            # THE reason this overlay exists. With security off, anyone with
+            # network reach to 9200 can DELETE /_all. Base disables it only so
+            # a laptop does not need enrolment tokens and a self-signed CA.
+            - name: xpack.security.enabled
+              value: "true"
+            - name: xpack.security.http.ssl.enabled
+              value: "true"
+            - name: xpack.security.transport.ssl.enabled
+              value: "true"
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: GS_ELASTIC_PASSWORD
+            # 2GB heap, still under half the 6Gi container limit (the other
+            # half is Lucene's off-heap page cache). Never exceed 31g: past
+            # that the JVM drops compressed oops and usable heap goes DOWN.
+            - name: ES_JAVA_OPTS
+              value: "-Xms2g -Xmx2g"
+            # Re-enable the disk watermark. Base disables it because a single
+            # laptop node otherwise flips indices read-only; in prod you want
+            # the warning.
+            - name: cluster.routing.allocation.disk.threshold_enabled
+              value: "true"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 6Gi
+            limits:
+              cpu: "4"
+              memory: 6Gi
+          # Security on means HTTPS on 9200, so the probes must use HTTPS too.
+          # ES presents its own generated CA, hence scheme: HTTPS with the
+          # kubelet not verifying (it cannot be given a CA bundle).
+          startupProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /_cluster/health?local=true
+              port: http
+          readinessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /_cluster/health?wait_for_status=yellow&timeout=5s
+              port: http
+          livenessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /
+              port: http

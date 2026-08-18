@@ -1,0 +1,76 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Everything lands in one namespace (contract.md).
+namespace: guest-platform
+
+# `labels` (not the deprecated `commonLabels`) and WITHOUT includeSelectors:
+# adding a label to a Deployment/StatefulSet selector is an immutable-field
+# change, so it would break `kubectl apply` on any cluster that already ran a
+# previous version of these manifests.
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: guest-platform
+
+resources:
+  - namespace.yaml
+  - secret.yaml
+  - configmaps.yaml
+  # infra
+  - postgres.yaml
+  - redis.yaml
+  - elasticsearch.yaml
+  - mosquitto.yaml
+  # apps
+  - guest-score-api.yaml
+  - guest-score-scoring.yaml
+  - marketmate-api.yaml
+  - web.yaml
+  - ingress.yaml
+
+# Broker config, Postgres init script and postgresql.conf are the SAME bytes
+# the compose stack bind-mounts, so a change cannot apply to compose and
+# silently miss the cluster.
+#
+# They live in ./config/ as copies rather than as references to
+# ../../mosquitto/ and ../../postgres/, because kustomize refuses to read any
+# file outside the kustomization root (and resolves symlinks before checking,
+# so a symlink does not help). The alternative is requiring
+# `--load-restrictor=LoadRestrictionsNone` on every build, which is a trap: it
+# turns a plain `kustomize build k8s/overlays/local` into a failure.
+#
+# ./config/ is therefore GENERATED. Do not edit it by hand:
+#   make k8s-sync-config    refresh the copies from the canonical files
+#   make k8s-check-config   fail if they have drifted (runs inside k8s-apply)
+configMapGenerator:
+  - name: mosquitto-config
+    files:
+      - mosquitto.conf=config/mosquitto.conf
+  - name: postgres-initdb
+    files:
+      - 01-databases.sh=config/01-databases.sh
+  - name: postgres-config
+    files:
+      - postgresql.conf=config/postgresql.conf
+
+generatorOptions:
+  # Keep the content hash suffix (the default). It is what makes a config
+  # change roll the pods: the Deployment's volume reference changes, so the
+  # pod template changes, so Kubernetes performs a rollout. Disabling it would
+  # leave mosquitto running the old config after `kubectl apply`.
+  disableNameSuffixHash: false
+
+images:
+  # Tags are pinned per overlay. Listed here so `kustomize edit set image`
+  # works from either overlay without first adding the entry.
+  - name: guest-score-api
+    newTag: dev
+  - name: guest-score-scoring
+    newTag: dev
+  - name: marketmate-api
+    newTag: dev
+  - name: guest-score-web
+    newTag: dev
+  - name: marketmate-web
+    newTag: dev

@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  compose:
+    name: Compose config is valid
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `docker compose config` resolves every variable, interpolation and
+      # merge key without starting anything. It catches the failure mode that
+      # matters here: a typo that only surfaces when someone runs `make up` for
+      # the first time.
+      - name: Validate the default profile
+        run: docker compose -f docker-compose.yml config -q
+
+      - name: Validate with the application profile
+        run: |
+          # The app services build from sibling repositories that are not
+          # checked out here, so point the build contexts at this directory.
+          # Compose still validates the whole graph; it just does not build.
+          GUEST_SCORE_PATH=. MARKET_MATE_PATH=. \
+            docker compose -f docker-compose.yml --profile apps config -q
+
+      - name: Render the resolved config to the summary
+        run: |
+          {
+            echo "### Resolved services"
+            echo '```'
+            docker compose -f docker-compose.yml --profile all config --services 2>/dev/null \
+              || docker compose -f docker-compose.yml config --services
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  kubernetes:
+    name: Manifests build and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kustomize and kubeconform
+        run: |
+          curl -sSL -o /tmp/kustomize.tgz \
+            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.5.0/kustomize_v5.5.0_linux_amd64.tar.gz
+          sudo tar -xzf /tmp/kustomize.tgz -C /usr/local/bin
+          curl -sSL -o /tmp/kubeconform.tgz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          sudo tar -xzf /tmp/kubeconform.tgz -C /usr/local/bin kubeconform
+          kustomize version && kubeconform -v
+
+      # The base config files are copies of the ones Compose mounts, because
+      # kustomize refuses to read outside its root. Drift between the two would
+      # mean Compose and Kubernetes silently running different configuration.
+      - name: Base config is in sync with the Compose config
+        run: make k8s-check-config
+
+      - name: Build and validate each overlay
+        run: |
+          for overlay in local prod; do
+            echo "::group::$overlay"
+            kustomize build "k8s/overlays/$overlay" > "/tmp/$overlay.yaml"
+            python3 -c "
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open('/tmp/$overlay.yaml')) if d]
+          print(f'$overlay: {len(docs)} resources parse as YAML')"
+            # Default schema location only. Adding a CRD catalogue would make
+            # this job depend on a third-party repository being reachable, and
+            # nothing here is a custom resource.
+            kubeconform -strict -summary -kubernetes-version 1.30.0 "/tmp/$overlay.yaml"
+            echo "::endgroup::"
+          done
+
+      # Probes, resource limits and a non-root securityContext are the three
+      # things whose absence is invisible until production. Assert them.
+      - name: Every workload has probes, limits and a non-root context
+        run: |
+          kustomize build k8s/overlays/prod > /tmp/prod.yaml
+          python3 - <<'PY'
+          import sys, yaml
+          bad = []
+          for d in yaml.safe_load_all(open('/tmp/prod.yaml')):
+              if not d or d.get('kind') not in ('Deployment', 'StatefulSet'):
+                  continue
+              name = d['metadata']['name']
+              spec = d['spec']['template']['spec']
+              for c in spec.get('containers', []):
+                  where = f"{d['kind']}/{name}:{c['name']}"
+                  if not (c.get('readinessProbe') or c.get('livenessProbe')):
+                      bad.append(f"{where} has no probe")
+                  res = c.get('resources', {})
+                  if not res.get('requests') or not res.get('limits'):
+                      bad.append(f"{where} has no resource requests or limits")
+              sc = spec.get('securityContext', {})
+              if not sc.get('runAsNonRoot'):
+                  bad.append(f"{d['kind']}/{name} does not set runAsNonRoot")
+          if bad:
+              print("\n".join(bad)); sys.exit(1)
+          print("every workload has probes, limits and runAsNonRoot")
+          PY
+
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: |
+          for f in $(git ls-files '*.sh'); do bash -n "$f" || exit 1; done
+          sh -n postgres/init/01-databases.sh
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck scripts/*.sh
+          shellcheck -s sh postgres/init/01-databases.sh
+
+  smoke:
+    name: Smoke test against the real infrastructure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # This is the job that proves the compose file describes something that
+      # actually starts. `config -q` only proves it parses.
+      - name: Bring up the infrastructure
+        run: |
+          cp .env.example .env
+          docker compose up -d --wait --wait-timeout 300 || {
+            docker compose ps
+            docker compose logs --tail=80
+            exit 1
+          }
+          docker compose ps
+
+      - name: Smoke
+        run: ./scripts/smoke.sh
+
+      - name: Postgres created both databases
+        run: |
+          for db in guestscore marketmate; do
+            docker compose exec -T postgres psql -U postgres -tAc \
+              "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1 \
+              || { echo "::error::database $db was not created"; exit 1; }
+            echo "database $db exists"
+          done
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail=150
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

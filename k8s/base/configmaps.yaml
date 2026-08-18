@@ -1,0 +1,81 @@
+# One ConfigMap per application. Only non-secret values live here; anything
+# with a credential in it (including the Postgres DSNs, which embed a password)
+# is in secret.yaml.
+#
+# Values are verbatim from contract.md's "Environment variables" section. The
+# in-cluster DNS names (postgres, redis, elasticsearch, mosquitto) match the
+# Services in this directory, so the contract's defaults work unchanged.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guest-score-api-config
+  labels:
+    app.kubernetes.io/name: guest-score-api
+    app.kubernetes.io/part-of: guest-score
+data:
+  GS_ADDR: ":8090"
+  GS_LOG_LEVEL: "info"
+  GS_SEED: "true"
+
+  GS_POSTGRES_MAX_CONNS: "10"
+  # Only consulted when GS_POSTGRES_DSN is empty; kept so a debug pod can drop
+  # the DSN and fall back to the JSON FileStore without editing the manifest.
+  GS_DATA_PATH: "./data/store.json"
+  GS_MIGRATE: "true"
+
+  GS_REDIS_ADDR: "redis:6379"
+  GS_REDIS_DB: "0"
+  GS_CACHE_TTL: "60s"
+
+  GS_ELASTIC_URL: "http://elasticsearch:9200"
+  GS_ELASTIC_INDEX: "guest-score-guests"
+  GS_ELASTIC_USERNAME: ""
+
+  GS_MQTT_URL: "tcp://mosquitto:1883"
+  GS_MQTT_CLIENT_ID: "guest-score-ingest"
+  # The + is a single-level wildcard: one segment, the property id.
+  GS_MQTT_TOPIC: "guestscore/+/events"
+  GS_MQTT_USERNAME: ""
+
+  GS_SCORING_GRPC: "guest-score-scoring:9090"
+  GS_GRAPHQL: "true"
+  # Overlays decide: on in local, off in prod.
+  GS_GRAPHIQL: "false"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guest-score-scoring-config
+  labels:
+    app.kubernetes.io/name: guest-score-scoring
+    app.kubernetes.io/part-of: guest-score
+data:
+  GS_GRPC_ADDR: ":9090"
+  GS_LOG_LEVEL: "info"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: marketmate-api-config
+  labels:
+    app.kubernetes.io/name: marketmate-api
+    app.kubernetes.io/part-of: marketmate
+data:
+  # MarketMate uses the bare PORT convention, not MM_ADDR.
+  PORT: "8081"
+  MM_MIGRATE: "true"
+
+  MM_REDIS_ADDR: "redis:6379"
+  # DB 1 — Guest Score owns DB 0 on the same Redis.
+  MM_REDIS_DB: "1"
+
+  MM_ELASTIC_URL: "http://elasticsearch:9200"
+  MM_ELASTIC_INDEX: "marketmate-recipes"
+  MM_STORE_CACHE_TTL: "15m"
+
+  MM_GRAPHQL: "true"
+  MM_GRAPHIQL: "false"
+  # Fixture providers, so the pod boots with no third-party API keys. The prod
+  # overlay sets this to "false" and supplies real keys from the secret store.
+  USE_FIXTURES: "true"

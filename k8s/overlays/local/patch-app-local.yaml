@@ -1,0 +1,24 @@
+# JSON6902, not strategic merge: this one patch is applied to all five app
+# Deployments and their containers are named differently (api / web /
+# scoring), so a strategic merge patch would need one file per workload.
+# Indexing containers/0 works uniformly — every app pod has exactly one
+# application container (the wait-for-postgres initContainer is a separate
+# list and is intentionally left on IfNotPresent, since it pulls the stock
+# postgres image from a registry).
+
+# kind has no registry. Images are side-loaded with `kind load docker-image`.
+- op: replace
+  path: /spec/template/spec/containers/0/imagePullPolicy
+  value: Never
+
+# Requests are what the scheduler reserves. A single kind node is usually
+# given 2-4 CPU, and base's requests (100m x 5 apps + 250m ES + 100m PG)
+# leave nothing for the control plane. Limits stay as base set them: they are
+# the safety net, and lowering them locally would turn a slow first request
+# into an OOMKill.
+- op: replace
+  path: /spec/template/spec/containers/0/resources/requests/cpu
+  value: 10m
+- op: replace
+  path: /spec/template/spec/containers/0/resources/requests/memory
+  value: 32Mi

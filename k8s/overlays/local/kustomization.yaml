@@ -1,0 +1,69 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# LOCAL overlay — targets a kind cluster created from kind/cluster.yaml.
+#
+# Differences from base:
+#   * imagePullPolicy: Never on the five app images. kind has no registry;
+#     images arrive via `kind load docker-image` (make kind-load). With the
+#     default IfNotPresent a typo in an image tag fails as ImagePullBackOff
+#     against Docker Hub after a 30s timeout; with Never it fails instantly
+#     and unambiguously as ErrImageNeverPull.
+#   * GraphiQL and fixtures on.
+#   * One replica of everything and small requests, so the whole platform fits
+#     in a single kind node.
+#   * *.localtest.me hosts — that domain resolves to 127.0.0.1 from any
+#     resolver, so nobody has to edit /etc/hosts.
+#   * Small PVCs.
+
+namespace: guest-platform
+
+resources:
+  - ../../base
+  # Host access to the infra services (see kind/cluster.yaml extraPortMappings).
+  - nodeports.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/environment: local
+
+images:
+  - name: guest-score-api
+    newTag: dev
+  - name: guest-score-scoring
+    newTag: dev
+  - name: guest-score-web
+    newTag: dev
+  - name: marketmate-api
+    newTag: dev
+  - name: marketmate-web
+    newTag: dev
+
+patches:
+  # --- dev-only feature flags ------------------------------------------------
+  - path: patch-config-dev-flags.yaml
+
+  # --- app workloads: never pull, one replica, laptop-sized ------------------
+  - path: patch-app-local.yaml
+    target:
+      kind: Deployment
+      labelSelector: app.kubernetes.io/component in (api,web,grpc)
+
+  # --- infra: shrink to what a kind node can actually spare -------------------
+  - path: patch-infra-small.yaml
+
+  # --- PVC sizes. volumeClaimTemplates has no strategic-merge key, so a
+  #     strategic patch would REPLACE the whole list. JSON6902 edits in place,
+  #     and a JSON6902 patch file needs one explicit target each.
+  - path: patch-pvc-postgres-local.yaml
+    target:
+      kind: StatefulSet
+      name: postgres
+  - path: patch-pvc-elasticsearch-local.yaml
+    target:
+      kind: StatefulSet
+      name: elasticsearch
+
+  # --- ingress hostnames ------------------------------------------------------
+  - path: patch-ingress-local.yaml

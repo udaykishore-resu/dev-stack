@@ -1,0 +1,112 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# PROD overlay.
+#
+# This is the shape of a production deployment, not a turnkey one: image tags,
+# hostnames, the StorageClass and the Secret all have to be supplied by the
+# environment. What it does encode is every difference from local that is a
+# decision rather than a value.
+#
+#   * The fake Secret from base is REMOVED. `platform-secrets` must already
+#     exist in the namespace, created by External Secrets / Vault / SOPS / the
+#     cloud CSI secret driver. See README.md in this directory.
+#   * GraphiQL off. It is an unauthenticated schema-introspection UI.
+#   * Fixtures off: real provider keys come from the secret store.
+#   * Elasticsearch security ON (base has it off for local convenience).
+#   * 3 API replicas + HPA + PodDisruptionBudget.
+#   * imagePullPolicy IfNotPresent with immutable, digest-pinnable tags — never
+#     Always (it makes every pod start depend on registry availability) and
+#     never Never (there is no side-loading in a real cluster).
+#   * Larger PVCs, larger resources, topology spread so replicas do not all
+#     land on one node.
+
+namespace: guest-platform
+
+resources:
+  - ../../base
+  - pdb.yaml
+  - hpa.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/environment: prod
+
+images:
+  # Replace with the release tag or, better, a digest:
+  #   kustomize edit set image guest-score-api=registry.example.com/guest-score-api@sha256:...
+  - name: guest-score-api
+    newName: registry.example.com/guest-platform/guest-score-api
+    newTag: "1.0.0"
+  - name: guest-score-scoring
+    newName: registry.example.com/guest-platform/guest-score-scoring
+    newTag: "1.0.0"
+  - name: guest-score-web
+    newName: registry.example.com/guest-platform/guest-score-web
+    newTag: "1.0.0"
+  - name: marketmate-api
+    newName: registry.example.com/guest-platform/marketmate-api
+    newTag: "1.0.0"
+  - name: marketmate-web
+    newName: registry.example.com/guest-platform/marketmate-web
+    newTag: "1.0.0"
+
+replicas:
+  - name: guest-score-api
+    count: 3
+  - name: marketmate-api
+    count: 3
+  - name: guest-score-scoring
+    count: 3
+  - name: guest-score-web
+    count: 2
+  - name: marketmate-web
+    count: 2
+
+patches:
+  # The local Secret must not reach a real cluster. `$patch: delete` removes
+  # the resource from the build output entirely, so `kustomize build
+  # overlays/prod | kubectl apply -f -` cannot overwrite the real one with
+  # "postgres"/"postgres".
+  - path: patch-delete-fake-secret.yaml
+
+  # Feature flags.
+  - path: patch-config-prod-flags.yaml
+
+  # Elasticsearch: security on, bigger heap.
+  - path: patch-elasticsearch-prod.yaml
+
+  # Postgres: real resources.
+  - path: patch-postgres-prod.yaml
+
+  # Spread API replicas and give them prod-sized resources.
+  - path: patch-api-prod.yaml
+    target:
+      kind: Deployment
+      labelSelector: app.kubernetes.io/component=api
+
+  # Broker: password file + ACL + TLS listener.
+  - path: patch-mosquitto-prod.yaml
+
+  # Real hostnames + TLS.
+  - path: patch-ingress-prod.yaml
+
+  # PVCs. JSON6902, same reason as the local overlay.
+  - path: patch-pvc-postgres-prod.yaml
+    target:
+      kind: StatefulSet
+      name: postgres
+  - path: patch-pvc-elasticsearch-prod.yaml
+    target:
+      kind: StatefulSet
+      name: elasticsearch
+
+# Replace the broker config wholesale. `behavior: replace` keeps the generated
+# name (mosquitto-config) and its hash suffix, so the Deployment's volume
+# reference still resolves and the pod rolls when the config changes.
+configMapGenerator:
+  - name: mosquitto-config
+    behavior: replace
+    files:
+      - mosquitto.conf=mosquitto-prod.conf

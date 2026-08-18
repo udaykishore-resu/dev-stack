@@ -1,0 +1,6 @@
+# 1Gi is plenty for the demo datasets and keeps kind's node image small.
+# JSON6902 because volumeClaimTemplates has no strategic-merge key: a
+# strategic patch would replace the entire list, losing accessModes.
+- op: replace
+  path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+  value: 1Gi

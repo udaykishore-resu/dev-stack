@@ -1,0 +1,10 @@
+# Local environment — copy .env.example and edit, never commit the result.
+.env
+.env.local
+docker-compose.override.yml
+
+# Volumes and generated state
+data/
+*.log
+
+.DS_Store

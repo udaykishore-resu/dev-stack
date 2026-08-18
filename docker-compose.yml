@@ -1,0 +1,375 @@
+# dev-stack — one compose file for the whole platform.
+#
+# Profiles:
+#   (none)   infra only: postgres, redis, elasticsearch, mosquitto.  This is the
+#            default so `docker compose up -d` works even when the two app repos
+#            are not checked out next to this one.
+#   apps     the five application services from guest-score and market-mate.
+#   all      infra + apps (every app service is in both `apps` and `all`).
+#
+# The app services build from sibling directories.  If those directories are
+# missing, nothing breaks: compose never evaluates a build context for a service
+# whose profile is not active, so `make up-infra` still works on a fresh clone.
+#
+# Every value comes from .env with an inline default, so the file is runnable
+# with no .env at all.  See .env.example for the full list.
+
+name: dev-stack
+
+# ---------------------------------------------------------------------------
+# Anchors.  Duplicated blocks are a drift risk; these keep the app services
+# honest about how they depend on infra.
+# ---------------------------------------------------------------------------
+x-infra-ready: &infra-ready
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  elasticsearch:
+    condition: service_healthy
+  mosquitto:
+    condition: service_healthy
+
+x-app-defaults: &app-defaults
+  restart: unless-stopped
+  networks: [dev-stack]
+  profiles: [apps, all]
+
+services:
+  # =========================================================================
+  # PostgreSQL — one instance, two databases (guestscore + marketmate).
+  # Roles/DBs are created by postgres/init/01-databases.sh, which the official
+  # entrypoint runs exactly once, on an empty data directory.
+  # =========================================================================
+  postgres:
+    image: postgres:17-alpine
+    container_name: dev-stack-postgres
+    restart: unless-stopped
+    networks: [dev-stack]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      # Force SCRAM for every new role.  md5 is still the compiled-in default on
+      # some builds and we do not want a dev habit that fails a prod audit.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      # Consumed by the init script, not by postgres itself.
+      GS_DB_USER: ${GS_DB_USER:-guestscore}
+      GS_DB_PASSWORD: ${GS_DB_PASSWORD:-guestscore}
+      GS_DB_NAME: ${GS_DB_NAME:-guestscore}
+      MM_DB_USER: ${MM_DB_USER:-marketmate}
+      MM_DB_PASSWORD: ${MM_DB_PASSWORD:-marketmate}
+      MM_DB_NAME: ${MM_DB_NAME:-marketmate}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # Named volume: the two databases must survive `docker compose down`.
+      # `make clean` is the only thing that removes it.
+      - pgdata:/var/lib/postgresql/data
+      # :ro — the entrypoint only needs to read these.
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      # -q keeps the log quiet; we check the maintenance DB, not an app DB, so
+      # the probe goes healthy before the init script has finished creating them
+      # only if the server is genuinely accepting connections.
+      test: ["CMD-SHELL", "pg_isready -q -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-postgres} -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    # Resource hint: postgres with the tuning in postgresql.conf sits at roughly
+    # 150-250 MB RSS for this workload.  Uncomment under Docker Desktop if you
+    # want a hard ceiling:
+    #   deploy: { resources: { limits: { memory: 512M, cpus: "1.0" } } }
+
+  # =========================================================================
+  # Redis — shared cache.  Guest Score uses logical DB 0, MarketMate DB 1.
+  # =========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: dev-stack-redis
+    restart: unless-stopped
+    networks: [dev-stack]
+    # NO named volume, on purpose.  Redis here is a pure cache in front of
+    # Postgres/Elasticsearch: every key is derivable from a source of truth and
+    # every read path tolerates a miss (see the fallback table in contract.md).
+    # Persisting it would only let a stale RDB outlive a schema change and
+    # produce "impossible" bugs after a `docker compose down`.  --save ""
+    # disables RDB snapshots so the container never writes to disk at all.
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      # Cache semantics: evict the least-recently-used key rather than start
+      # returning OOM errors to the apps.
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    # Resource hint: bounded by --maxmemory above (default 256 MB) + ~20 MB.
+
+  # =========================================================================
+  # Elasticsearch — single node, security off.  LOCAL ONLY.
+  # =========================================================================
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    container_name: dev-stack-elasticsearch
+    restart: unless-stopped
+    networks: [dev-stack]
+    environment:
+      discovery.type: single-node
+      # WHY security is off: with xpack.security on, ES 8 self-signs a CA on
+      # first boot and every client needs the generated cert plus an enrolment
+      # token.  That is real work for zero local value.  It also means this
+      # container must never be exposed beyond 127.0.0.1 and the prod overlay
+      # MUST set xpack.security.enabled=true — see k8s/overlays/prod.
+      xpack.security.enabled: "false"
+      xpack.security.enrollment.enabled: "false"
+      # Heap is fixed at 512m/512m: equal Xms and Xmx stops the JVM resizing the
+      # heap under load, and 512 MB indexes both corpora comfortably while
+      # leaving room on an 8 GB laptop.  ES also wants roughly the same amount
+      # again for off-heap Lucene, hence the ~1 GB container limit below.
+      ES_JAVA_OPTS: ${ES_JAVA_OPTS:--Xms512m -Xmx512m}
+      # Single node with no replicas: a yellow cluster is the *expected* steady
+      # state otherwise, because replica shards can never be allocated.
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+      bootstrap.memory_lock: "false"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    ports:
+      - "${ELASTIC_PORT:-9200}:9200"
+      # 9300 (transport) is deliberately not published: nothing outside the
+      # compose network ever joins this cluster.
+    volumes:
+      # Named volume: reindexing both corpora from scratch is slow enough that
+      # you do not want it on every restart.
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      # Yellow is success (see the single-node comment above); red is not.
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s"
+          >/dev/null
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 60s
+    # Resource hint: needs ~1 GB (512 MB heap + Lucene off-heap + JVM overhead).
+    # If the container is killed with exit code 137, that is the OOM killer —
+    # raise the Docker Desktop memory allocation, do not lower ES_JAVA_OPTS
+    # below 512m or indexing will thrash.
+    #   deploy: { resources: { limits: { memory: 1G, cpus: "2.0" } } }
+
+  # =========================================================================
+  # Mosquitto — MQTT broker for the Guest Score event bus.
+  # =========================================================================
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: dev-stack-mosquitto
+    restart: unless-stopped
+    networks: [dev-stack]
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      # No named volume for persistence: retained LWT status messages are
+      # cheap to re-publish and we would rather start every session with a
+      # clean bus than debug a stale retained "online" from last week.
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+      - "${MQTT_WS_PORT:-9001}:9001"
+    healthcheck:
+      # -E exits as soon as the SUBACK arrives, so this proves the broker is
+      # actually accepting subscriptions rather than just holding the TCP port.
+      # $$ escapes the compose interpolation of $SYS.
+      test:
+        - CMD-SHELL
+        - >-
+          mosquitto_sub -h 127.0.0.1 -p 1883 -t '$$SYS/broker/uptime'
+          -i dev-stack-healthcheck -E -W 3 >/dev/null 2>&1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    # Resource hint: <32 MB. Nothing to tune.
+
+  # =========================================================================
+  # Applications — profile `apps`.
+  #
+  # Build contexts point at the sibling repos.  The path is a variable so a
+  # checkout that named the directory differently (marketmate vs market-mate)
+  # can be fixed in .env instead of by editing this file.
+  # =========================================================================
+
+  guest-score-api:
+    <<: *app-defaults
+    build:
+      context: ${GUEST_SCORE_PATH:-../guest-score}
+      dockerfile: ${GUEST_SCORE_API_DOCKERFILE:-Dockerfile}
+    image: guest-score-api:dev
+    container_name: dev-stack-guest-score-api
+    depends_on:
+      <<: *infra-ready
+      guest-score-scoring:
+        condition: service_started
+    environment:
+      GS_ADDR: ":8090"
+      GS_LOG_LEVEL: ${GS_LOG_LEVEL:-info}
+      GS_IDENTITY_KEY: ${GS_IDENTITY_KEY:-}
+      GS_SEED: ${GS_SEED:-true}
+
+      GS_POSTGRES_DSN: ${GS_POSTGRES_DSN:-postgres://guestscore:guestscore@postgres:5432/guestscore?sslmode=disable}
+      GS_POSTGRES_MAX_CONNS: ${GS_POSTGRES_MAX_CONNS:-10}
+      GS_DATA_PATH: ${GS_DATA_PATH:-./data/store.json}
+      GS_MIGRATE: ${GS_MIGRATE:-true}
+
+      GS_REDIS_ADDR: ${GS_REDIS_ADDR:-redis:6379}
+      GS_REDIS_PASSWORD: ${GS_REDIS_PASSWORD:-}
+      GS_REDIS_DB: ${GS_REDIS_DB:-0}
+      GS_CACHE_TTL: ${GS_CACHE_TTL:-60s}
+
+      GS_ELASTIC_URL: ${GS_ELASTIC_URL:-http://elasticsearch:9200}
+      GS_ELASTIC_INDEX: ${GS_ELASTIC_INDEX:-guest-score-guests}
+      GS_ELASTIC_USERNAME: ${GS_ELASTIC_USERNAME:-}
+      GS_ELASTIC_PASSWORD: ${GS_ELASTIC_PASSWORD:-}
+
+      GS_MQTT_URL: ${GS_MQTT_URL:-tcp://mosquitto:1883}
+      GS_MQTT_CLIENT_ID: ${GS_MQTT_CLIENT_ID:-guest-score-ingest}
+      GS_MQTT_TOPIC: ${GS_MQTT_TOPIC:-guestscore/+/events}
+      GS_MQTT_USERNAME: ${GS_MQTT_USERNAME:-}
+      GS_MQTT_PASSWORD: ${GS_MQTT_PASSWORD:-}
+
+      GS_SCORING_GRPC: ${GS_SCORING_GRPC:-guest-score-scoring:9090}
+      GS_GRAPHQL: ${GS_GRAPHQL:-true}
+      GS_GRAPHIQL: ${GS_GRAPHIQL:-true}
+    ports:
+      - "${GS_API_PORT:-8090}:8090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8090/api/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  guest-score-scoring:
+    <<: *app-defaults
+    build:
+      context: ${GUEST_SCORE_PATH:-../guest-score}
+      dockerfile: ${GUEST_SCORE_SCORING_DOCKERFILE:-Dockerfile.scoring}
+    image: guest-score-scoring:dev
+    container_name: dev-stack-guest-score-scoring
+    environment:
+      GS_GRPC_ADDR: ":9090"
+      GS_LOG_LEVEL: ${GS_LOG_LEVEL:-info}
+    ports:
+      - "${GS_SCORING_PORT:-9090}:9090"
+    # No compose healthcheck: this is a pure gRPC server with no HTTP surface
+    # and distroless images carry no grpc_health_probe binary.  Kubernetes can
+    # check it natively (see k8s/base/guest-score-scoring.yaml, `grpc:` probe);
+    # compose has no equivalent, so guest-score-api depends on
+    # `service_started` and retries the gRPC dial itself.
+
+  guest-score-web:
+    <<: *app-defaults
+    build:
+      context: ${GUEST_SCORE_PATH:-../guest-score}
+      dockerfile: ${GUEST_SCORE_WEB_DOCKERFILE:-Dockerfile.web}
+    image: guest-score-web:dev
+    container_name: dev-stack-guest-score-web
+    depends_on:
+      guest-score-api:
+        condition: service_healthy
+    environment:
+      # Vite reads VITE_* at build time; at run time the dev server proxies to
+      # the API over the compose network.
+      VITE_API_BASE_URL: ${GS_WEB_API_BASE_URL:-http://guest-score-api:8090}
+    ports:
+      - "${GS_WEB_PORT:-5174}:5174"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5174/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  marketmate-api:
+    <<: *app-defaults
+    build:
+      context: ${MARKET_MATE_PATH:-../market-mate}
+      dockerfile: ${MARKET_MATE_API_DOCKERFILE:-Dockerfile}
+    image: marketmate-api:dev
+    container_name: dev-stack-marketmate-api
+    depends_on: *infra-ready
+    environment:
+      PORT: "8081"
+      MM_POSTGRES_DSN: ${MM_POSTGRES_DSN:-postgres://marketmate:marketmate@postgres:5432/marketmate?sslmode=disable}
+      MM_MIGRATE: ${MM_MIGRATE:-true}
+      MM_REDIS_ADDR: ${MM_REDIS_ADDR:-redis:6379}
+      MM_REDIS_DB: ${MM_REDIS_DB:-1}
+      MM_ELASTIC_URL: ${MM_ELASTIC_URL:-http://elasticsearch:9200}
+      MM_ELASTIC_INDEX: ${MM_ELASTIC_INDEX:-marketmate-recipes}
+      MM_STORE_CACHE_TTL: ${MM_STORE_CACHE_TTL:-15m}
+      MM_GRAPHQL: ${MM_GRAPHQL:-true}
+      MM_GRAPHIQL: ${MM_GRAPHIQL:-true}
+      # Fixtures on means no external API keys are needed to boot.
+      USE_FIXTURES: ${USE_FIXTURES:-true}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+    ports:
+      - "${MM_API_PORT:-8081}:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/api/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  marketmate-web:
+    <<: *app-defaults
+    build:
+      context: ${MARKET_MATE_PATH:-../market-mate}
+      dockerfile: ${MARKET_MATE_WEB_DOCKERFILE:-Dockerfile.web}
+    image: marketmate-web:dev
+    container_name: dev-stack-marketmate-web
+    depends_on:
+      marketmate-api:
+        condition: service_healthy
+    environment:
+      VITE_API_BASE_URL: ${MM_WEB_API_BASE_URL:-http://marketmate-api:8081}
+    ports:
+      - "${MM_WEB_PORT:-5173}:5173"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5173/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+volumes:
+  pgdata:
+    name: dev-stack-pgdata
+  esdata:
+    name: dev-stack-esdata
+  # Deliberately absent: a redis volume.  See the comment on the redis service.
+
+networks:
+  dev-stack:
+    name: dev-stack
+    driver: bridge

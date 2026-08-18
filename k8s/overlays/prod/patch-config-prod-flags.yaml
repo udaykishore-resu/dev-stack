@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guest-score-api-config
+data:
+  # GraphiQL serves an unauthenticated introspection UI. Off.
+  GS_GRAPHIQL: "false"
+  GS_GRAPHQL: "true"
+  GS_LOG_LEVEL: "info"
+  # Never seed a demo dataset into a real database.
+  GS_SEED: "false"
+  # HTTPS to Elasticsearch, because the prod overlay enables xpack.security.
+  GS_ELASTIC_URL: "https://elasticsearch:9200"
+  GS_ELASTIC_USERNAME: "elastic"
+  # Authenticated broker; the password comes from the Secret.
+  GS_MQTT_USERNAME: "guest-score-ingest"
+  GS_MQTT_URL: "tcp://mosquitto:1883"
+  # More connections than local: 3 replicas x this must stay under the
+  # server's max_connections.
+  GS_POSTGRES_MAX_CONNS: "20"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: marketmate-api-config
+data:
+  MM_GRAPHIQL: "false"
+  MM_GRAPHQL: "true"
+  # Real providers. The keys must be present in platform-secrets or the
+  # extraction path will fail at first use rather than at boot.
+  USE_FIXTURES: "false"
+  MM_ELASTIC_URL: "https://elasticsearch:9200"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guest-score-scoring-config
+data:
+  GS_LOG_LEVEL: "info"

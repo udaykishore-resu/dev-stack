@@ -1,0 +1,63 @@
+# Infra sized for a single kind node on a laptop.
+#
+# Requests only — limits are inherited from base. A request is a scheduling
+# reservation, so oversized requests on a 2-CPU kind node mean pods sit
+# Pending forever with "Insufficient cpu" and it looks like a broken manifest.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  template:
+    spec:
+      containers:
+        - name: postgres
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+spec:
+  template:
+    spec:
+      containers:
+        - name: elasticsearch
+          resources:
+            requests:
+              cpu: 100m
+              # Must stay above the 512m JVM heap: if the request (and with it
+              # the QoS guarantee) sits below the heap, the kubelet evicts ES
+              # under node pressure the moment the heap fills.
+              memory: 640Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+spec:
+  template:
+    spec:
+      containers:
+        - name: redis
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mosquitto
+spec:
+  template:
+    spec:
+      containers:
+        - name: mosquitto
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi

@@ -1,0 +1,67 @@
+# Mount the password file and ACL, which live in a Secret rather than the
+# config ConfigMap: mosquitto_passwd hashes are credentials.
+#
+# Create them with:
+#   docker run --rm -v "$PWD/secrets:/s" eclipse-mosquitto:2 \
+#     mosquitto_passwd -c -b /s/passwd guest-score-ingest "$PASSWORD"
+#   kubectl -n guest-platform create secret generic mosquitto-auth \
+#     --from-file=passwd=secrets/passwd --from-file=acl=secrets/acl
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mosquitto
+spec:
+  template:
+    spec:
+      containers:
+        - name: mosquitto
+          volumeMounts:
+            - name: config
+              mountPath: /mosquitto/config
+              readOnly: true
+            - name: data
+              mountPath: /mosquitto/data
+            - name: logs
+              mountPath: /mosquitto/log
+            - name: auth
+              mountPath: /mosquitto/secrets
+              readOnly: true
+            - name: certs
+              mountPath: /mosquitto/certs
+              readOnly: true
+          readinessProbe:
+            # allow_anonymous false, so the probe needs credentials of its own.
+            exec:
+              command:
+                - sh
+                - -c
+                - mosquitto_sub -h 127.0.0.1 -p 1883 -t '$SYS/broker/uptime'
+                  -u "$MQTT_PROBE_USER" -P "$MQTT_PROBE_PASSWORD"
+                  -i k8s-readiness -E -W 3
+          env:
+            - name: MQTT_PROBE_USER
+              value: guest-score-ingest
+            - name: MQTT_PROBE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: GS_MQTT_PASSWORD
+      volumes:
+        - name: config
+          configMap:
+            name: mosquitto-config
+        - name: data
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: logs
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: auth
+          secret:
+            secretName: mosquitto-auth
+            defaultMode: 384      # 0600 octal
+        - name: certs
+          secret:
+            secretName: mosquitto-tls
+            optional: true
+            defaultMode: 384

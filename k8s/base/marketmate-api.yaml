@@ -1,0 +1,154 @@
+# marketmate-api — HTTP API + GraphQL, port 8081, health at /api/health.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: marketmate-api
+  labels:
+    app.kubernetes.io/name: marketmate-api
+    app.kubernetes.io/part-of: marketmate
+spec:
+  selector:
+    app.kubernetes.io/name: marketmate-api
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: marketmate-api
+  labels:
+    app.kubernetes.io/name: marketmate-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: marketmate
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: marketmate-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: marketmate-api
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: marketmate
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Same reasoning as guest-score-api: MM_MIGRATE=true runs migrations in
+        # process on boot, so the container must not start before Postgres is
+        # answering. Cheaper than a CrashLoopBackOff cycle.
+        - name: wait-for-postgres
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "waiting for postgres:5432 ..."
+              i=0
+              until pg_isready -q -h postgres -p 5432 -U marketmate -d marketmate; do
+                i=$((i + 1))
+                if [ "$i" -ge 60 ]; then
+                  echo "postgres did not become ready within 120s" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+              echo "postgres is accepting connections"
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 70
+            capabilities:
+              drop: ["ALL"]
+      containers:
+        - name: api
+          image: marketmate-api:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: marketmate-api-config
+          env:
+            - name: MM_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: MM_POSTGRES_DSN }
+            # Not in contract.md (MarketMate has no documented ES credential
+            # vars, unlike Guest Score). Injected anyway because the prod
+            # overlay enables xpack.security; see the note in secret.yaml.
+            - name: MM_ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: MM_ELASTIC_PASSWORD }
+            # Unused while USE_FIXTURES=true, but always defined so switching
+            # fixtures off is a one-line overlay change, not a manifest edit.
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: OPENAI_API_KEY }
+            - name: GOOGLE_MAPS_API_KEY
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: GOOGLE_MAPS_API_KEY }
+            - name: YOUTUBE_API_KEY
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: YOUTUBE_API_KEY }
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 3
+            failureThreshold: 40
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              # Higher ceiling than Guest Score: the transcript/extraction path
+              # buffers whole documents in memory before caching them.
+              memory: 768Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,61 @@
+# Real hosts + TLS via cert-manager. Replace the domains and the ClusterIssuer
+# with the ones for your environment.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: guest-score
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # The API accepts JSON event payloads and GraphQL documents; 1m is the
+    # nginx default and is plenty, but pin it so an upstream default change
+    # cannot silently start returning 413.
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+spec:
+  tls:
+    - hosts: [guest-score.example.com]
+      secretName: guest-score-tls
+  rules:
+    - host: guest-score.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend: { service: { name: guest-score-api, port: { number: 8090 } } }
+          - path: /graphql
+            pathType: Prefix
+            backend: { service: { name: guest-score-api, port: { number: 8090 } } }
+          # NOTE: /graphiql is deliberately NOT routed in prod. GS_GRAPHIQL is
+          # also false, so this is defence in depth: even if the flag were
+          # flipped by mistake, there is no route to the explorer.
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: guest-score-web, port: { number: 5174 } } }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: marketmate
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+spec:
+  tls:
+    - hosts: [marketmate.example.com]
+      secretName: marketmate-tls
+  rules:
+    - host: marketmate.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend: { service: { name: marketmate-api, port: { number: 8081 } } }
+          - path: /graphql
+            pathType: Prefix
+            backend: { service: { name: marketmate-api, port: { number: 8081 } } }
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: marketmate-web, port: { number: 5173 } } }

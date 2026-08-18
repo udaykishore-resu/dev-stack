@@ -1,0 +1,8 @@
+# Lucene merges need free space roughly equal to the largest segment set, so
+# size for ~2x the steady-state index.
+- op: replace
+  path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+  value: 200Gi
+- op: add
+  path: /spec/volumeClaimTemplates/0/spec/storageClassName
+  value: fast-ssd

@@ -1,0 +1,161 @@
+# guest-score-api — HTTP API + GraphQL, port 8090, health at /api/health.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guest-score-api
+  labels:
+    app.kubernetes.io/name: guest-score-api
+    app.kubernetes.io/part-of: guest-score
+spec:
+  selector:
+    app.kubernetes.io/name: guest-score-api
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guest-score-api
+  labels:
+    app.kubernetes.io/name: guest-score-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: guest-score
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: guest-score-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: guest-score-api
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: guest-score
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532        # `nonroot` in distroless
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # The app runs its own embedded migrations on boot (GS_MIGRATE=true),
+        # so there is no migration Job. But migrations on boot means the
+        # container hard-fails if Postgres is not yet accepting connections,
+        # and CrashLoopBackOff's exponential backoff turns a 20s database
+        # start into a 5-minute app start. This init container absorbs that.
+        - name: wait-for-postgres
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "waiting for postgres:5432 ..."
+              i=0
+              until pg_isready -q -h postgres -p 5432 -U guestscore -d guestscore; do
+                i=$((i + 1))
+                if [ "$i" -ge 60 ]; then
+                  echo "postgres did not become ready within 120s" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+              echo "postgres is accepting connections"
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 70
+            capabilities:
+              drop: ["ALL"]
+      containers:
+        - name: api
+          image: guest-score-api:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8090
+          envFrom:
+            - configMapRef:
+                name: guest-score-api-config
+          env:
+            - name: GS_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: GS_POSTGRES_DSN }
+            - name: GS_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: GS_REDIS_PASSWORD }
+            - name: GS_ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: GS_ELASTIC_PASSWORD }
+            - name: GS_MQTT_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: GS_MQTT_PASSWORD }
+            - name: GS_IDENTITY_KEY
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: GS_IDENTITY_KEY }
+          # Migrations plus optional seeding run before the listener opens, so
+          # first-boot readiness can take a while. startupProbe owns that
+          # window; liveness only arms afterwards.
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 3
+            failureThreshold: 40        # up to 120s for migrate + seed
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            # Deliberately slack: a slow Postgres should make the pod
+            # unready, not restart it. Restarting only re-runs migrations.
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            # GS_DATA_PATH is relative (./data/store.json); give the FileStore
+            # fallback somewhere writable so a DSN-less debug pod still works.
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 128Mi
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,108 @@
+# Ingress — one host per application.
+#
+# WHY TWO HOSTS AND NOT TWO PATH PREFIXES:
+# both products serve a SPA at `/` and an API at `/api` + `/graphql`. Those
+# paths collide, and mounting one of them under a sub-path (/marketmate/...)
+# would require the Vite bundles to be rebuilt with a matching base href and
+# every absolute API path in the Go handlers rewritten. Host-based routing
+# keeps both apps at their natural paths and keeps same-origin fetches working
+# (which is why the web pods ship VITE_API_BASE_URL="").
+#
+# Hosts here are placeholders; both overlays patch them:
+#   local -> *.localtest.me  (resolves to 127.0.0.1 with no /etc/hosts edit)
+#   prod  -> the real domains + TLS
+#
+# Longest-prefix wins in ingress-nginx, so `/api` and `/graphql` beat `/`
+# regardless of the order of the rules below.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: guest-score
+  labels:
+    app.kubernetes.io/part-of: guest-score
+  annotations:
+    # SPA client-side routing: a deep link like /guests/GS-4881 must return
+    # index.html rather than the web server's 404.
+    nginx.ingress.kubernetes.io/use-regex: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: guest-score.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: guest-score-api
+                port:
+                  number: 8090
+          - path: /graphql
+            pathType: Prefix
+            backend:
+              service:
+                name: guest-score-api
+                port:
+                  number: 8090
+          # Dev-only explorer. The route always exists; whether it answers is
+          # decided by GS_GRAPHIQL, which the prod overlay sets to "false".
+          # Routing it here rather than deleting the rule per-overlay means one
+          # env var is the single switch.
+          - path: /graphiql
+            pathType: Prefix
+            backend:
+              service:
+                name: guest-score-api
+                port:
+                  number: 8090
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: guest-score-web
+                port:
+                  number: 5174
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: marketmate
+  labels:
+    app.kubernetes.io/part-of: marketmate
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: marketmate.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: marketmate-api
+                port:
+                  number: 8081
+          - path: /graphql
+            pathType: Prefix
+            backend:
+              service:
+                name: marketmate-api
+                port:
+                  number: 8081
+          - path: /graphiql
+            pathType: Prefix
+            backend:
+              service:
+                name: marketmate-api
+                port:
+                  number: 8081
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: marketmate-web
+                port:
+                  number: 5173

@@ -1,0 +1,10 @@
+# Resize is one-way: a PVC can grow (with an allowVolumeExpansion
+# StorageClass) but never shrink, and a StatefulSet's volumeClaimTemplates are
+# immutable after creation — changing this on a live StatefulSet requires
+# deleting it with --cascade=orphan. Pick a size you can live with.
+- op: replace
+  path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+  value: 100Gi
+- op: add
+  path: /spec/volumeClaimTemplates/0/spec/storageClassName
+  value: fast-ssd

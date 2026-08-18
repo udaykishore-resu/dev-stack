@@ -1,0 +1,93 @@
+# HPAs for the two APIs only.
+#
+# Not autoscaled, on purpose:
+#   postgres / elasticsearch  stateful, scaling them is a data operation
+#   redis / mosquitto         single-instance by design (see their manifests)
+#   the web pods              static files; 2 replicas is about availability
+#
+# The HPA owns .spec.replicas once it exists. The `replicas:` block in
+# kustomization.yaml therefore only sets the value the Deployment is CREATED
+# with; after that the HPA moves it. Keep them consistent (3) so a fresh
+# apply does not cause a scale-down blip.
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: guest-score-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: guest-score-api
+  minReplicas: 3
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # Percentage of the REQUEST (500m, set in patch-api-prod.yaml), not
+          # of the limit. 70% leaves headroom for the ~30s it takes a new pod
+          # to pass its startupProbe.
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      # React fast to a traffic spike.
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+    scaleDown:
+      # Slowly. Aggressive scale-down plus a bursty workload is how you get
+      # replica flapping, and each new pod costs a cold cache.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pod
+          value: 1
+          periodSeconds: 60
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: marketmate-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: marketmate-api
+  minReplicas: 3
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pod
+          value: 1
+          periodSeconds: 60

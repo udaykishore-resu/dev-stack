@@ -1,0 +1,28 @@
+# GraphiQL is the in-browser explorer. It is the single most useful thing on a
+# local cluster and must never be on in prod, so it is flipped here rather
+# than defaulted on in base.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guest-score-api-config
+data:
+  GS_GRAPHIQL: "true"
+  GS_SEED: "true"
+  GS_LOG_LEVEL: "debug"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: marketmate-api-config
+data:
+  MM_GRAPHIQL: "true"
+  # Fixture providers: no OPENAI_API_KEY / GOOGLE_MAPS_API_KEY / YOUTUBE_API_KEY
+  # needed, so a fresh clone boots with zero credentials.
+  USE_FIXTURES: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guest-score-scoring-config
+data:
+  GS_LOG_LEVEL: "debug"

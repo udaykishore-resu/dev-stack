@@ -1,0 +1,161 @@
+# Elasticsearch — StatefulSet + volumeClaimTemplates.
+#
+# Indices are expensive to rebuild and Lucene segment files are not something
+# you want on an emptyDir that vanishes on reschedule.
+#
+# SECURITY: the base disables xpack.security so a fresh `kubectl apply` works
+# with the contract's plain-HTTP URLs (GS_ELASTIC_URL=http://elasticsearch:9200).
+# overlays/prod turns it back on. Do not ship the base as-is.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  labels:
+    app.kubernetes.io/name: elasticsearch
+    app.kubernetes.io/component: search
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: elasticsearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: http
+      protocol: TCP
+    - name: transport
+      port: 9300
+      targetPort: transport
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  labels:
+    app.kubernetes.io/name: elasticsearch
+    app.kubernetes.io/component: search
+spec:
+  serviceName: elasticsearch
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: elasticsearch
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: elasticsearch
+        app.kubernetes.io/component: search
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000         # `elasticsearch` in the official image
+        runAsGroup: 0           # the image's files are group 0
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      # No privileged initContainer to set vm.max_map_count. It is a NODE
+      # setting, and raising it from a pod needs privileged+hostPID, which
+      # breaks the restricted PSS on this namespace. Set it on the node
+      # instead — kind/cluster.yaml does exactly that in its
+      # kubeadmConfigPatches / extraMounts notes, and elasticsearch/README.md
+      # documents the sysctl for bare Linux nodes.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 9200
+            - name: transport
+              containerPort: 9300
+          env:
+            - name: discovery.type
+              value: single-node
+            - name: cluster.name
+              value: guest-platform
+            - name: node.name
+              value: es-0
+            # LOCAL/BASE ONLY — see the header. Prod overlay flips this.
+            - name: xpack.security.enabled
+              value: "false"
+            - name: xpack.security.enrollment.enabled
+              value: "false"
+            # Xms == Xmx: a resizing heap re-tunes the GC mid-run and produces
+            # latency spikes that look like "ES is randomly slow".
+            - name: ES_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+            # memory_lock needs CAP_IPC_LOCK, which we drop. Without it the JVM
+            # heap can be swapped; on a node with swap off (the k8s default)
+            # that is a non-issue.
+            - name: bootstrap.memory_lock
+              value: "false"
+            # A single node with no spare disk-pressure headroom otherwise
+            # flips indices to read-only and the failure is baffling.
+            - name: cluster.routing.allocation.disk.threshold_enabled
+              value: "false"
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+            - name: tmp
+              mountPath: /tmp
+          # ES takes 30-60s to become responsive. startupProbe absorbs that so
+          # liveness can stay tight afterwards.
+          startupProbe:
+            httpGet:
+              path: /_cluster/health?local=true
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30      # up to 150s
+          readinessProbe:
+            # wait_for_status=yellow, not green: a single node can never
+            # allocate replica shards, so yellow is the correct steady state.
+            httpGet:
+              path: /_cluster/health?wait_for_status=yellow&timeout=5s
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            # Cheap local check only. Never use a cluster-wide health call for
+            # liveness: a slow cluster would then kill the node that is slow,
+            # which is how a yellow cluster turns into a restart loop.
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              # 1Gi = 512Mi heap + Lucene's off-heap page cache + JVM overhead.
+              # Setting this to the heap size gets the pod OOMKilled (137) as
+              # soon as it indexes anything.
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            # NOT read-only: the ES entrypoint writes the keystore and
+            # generated settings into /usr/share/elasticsearch/config at start.
+            # Making that writable means the root FS cannot be locked down
+            # without an extra emptyDir overlay of the whole config dir, which
+            # breaks image upgrades.
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            # Overridden per overlay: 2Gi local, 50Gi prod.
+            storage: 10Gi

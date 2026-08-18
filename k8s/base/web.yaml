@@ -1,0 +1,202 @@
+# The two SPA front-ends. Both are static bundles served over HTTP; health is
+# a plain GET / (contract.md). Neither talks to Postgres, so neither needs an
+# initContainer — a browser hitting the app before the API is up sees a failed
+# fetch and retries, which is a far cheaper failure than a blocked rollout.
+#
+# guest-score-web  :5174
+# marketmate-web   :5173
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guest-score-web
+  labels:
+    app.kubernetes.io/name: guest-score-web
+    app.kubernetes.io/part-of: guest-score
+spec:
+  selector:
+    app.kubernetes.io/name: guest-score-web
+  ports:
+    - name: http
+      port: 5174
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guest-score-web
+  labels:
+    app.kubernetes.io/name: guest-score-web
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: guest-score
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: guest-score-web
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: guest-score-web
+        app.kubernetes.io/component: web
+        app.kubernetes.io/part-of: guest-score
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: guest-score-web:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5174
+          env:
+            # Relative base URL: the browser calls /api on the same origin and
+            # the Ingress routes it to guest-score-api. Baking an absolute
+            # in-cluster DNS name into a bundle that runs in a browser cannot
+            # work — the browser is not on the cluster network.
+            - name: VITE_API_BASE_URL
+              value: ""
+          startupProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 4
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              # Static file serving. If this ever needs more, something is
+              # rendering server-side that should not be.
+              cpu: 250m
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            # Most static servers (nginx, caddy) want a writable cache/run dir.
+            - name: cache
+              mountPath: /var/cache
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: marketmate-web
+  labels:
+    app.kubernetes.io/name: marketmate-web
+    app.kubernetes.io/part-of: marketmate
+spec:
+  selector:
+    app.kubernetes.io/name: marketmate-web
+  ports:
+    - name: http
+      port: 5173
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: marketmate-web
+  labels:
+    app.kubernetes.io/name: marketmate-web
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: marketmate
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: marketmate-web
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: marketmate-web
+        app.kubernetes.io/component: web
+        app.kubernetes.io/part-of: marketmate
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: marketmate-web:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5173
+          env:
+            - name: VITE_API_BASE_URL
+              value: ""
+          startupProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 4
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /var/cache
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}

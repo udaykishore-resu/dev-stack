@@ -1,0 +1,47 @@
+# localtest.me and every subdomain of it resolve to 127.0.0.1 in public DNS,
+# so http://guest-score.localtest.me works with no /etc/hosts edit and no
+# --resolve flag. kind/cluster.yaml maps host ports 80/443 into the node, so
+# the request reaches ingress-nginx directly.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: guest-score
+spec:
+  rules:
+    - host: guest-score.localtest.me
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend: { service: { name: guest-score-api, port: { number: 8090 } } }
+          - path: /graphql
+            pathType: Prefix
+            backend: { service: { name: guest-score-api, port: { number: 8090 } } }
+          - path: /graphiql
+            pathType: Prefix
+            backend: { service: { name: guest-score-api, port: { number: 8090 } } }
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: guest-score-web, port: { number: 5174 } } }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: marketmate
+spec:
+  rules:
+    - host: marketmate.localtest.me
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend: { service: { name: marketmate-api, port: { number: 8081 } } }
+          - path: /graphql
+            pathType: Prefix
+            backend: { service: { name: marketmate-api, port: { number: 8081 } } }
+          - path: /graphiql
+            pathType: Prefix
+            backend: { service: { name: marketmate-api, port: { number: 8081 } } }
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: marketmate-web, port: { number: 5173 } } }

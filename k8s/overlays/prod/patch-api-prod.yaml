@@ -1,0 +1,34 @@
+# Applied to both API Deployments (labelSelector app.kubernetes.io/component=api).
+# JSON6902 so one file covers both without naming their containers.
+
+# Spread replicas across nodes. Without this the scheduler is free to put all
+# three on one node and a single node drain takes the API down despite the PDB.
+- op: add
+  path: /spec/template/spec/topologySpreadConstraints
+  value:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: api
+
+# Real requests: the HPA scales on CPU utilisation as a PERCENTAGE OF THE
+# REQUEST, so a 10m request would make the target meaningless.
+- op: replace
+  path: /spec/template/spec/containers/0/resources/requests/cpu
+  value: 500m
+- op: replace
+  path: /spec/template/spec/containers/0/resources/requests/memory
+  value: 512Mi
+- op: replace
+  path: /spec/template/spec/containers/0/resources/limits/cpu
+  value: "2"
+- op: replace
+  path: /spec/template/spec/containers/0/resources/limits/memory
+  value: 1Gi
+
+# Give in-flight requests time to finish before SIGKILL.
+- op: add
+  path: /spec/template/spec/terminationGracePeriodSeconds
+  value: 45

@@ -1,0 +1,80 @@
+# PodDisruptionBudgets bound VOLUNTARY disruption only (node drains, cluster
+# upgrades, `kubectl drain`). They do not protect against crashes.
+#
+# minAvailable rather than maxUnavailable: with an HPA changing the replica
+# count underneath, a percentage of a moving target is harder to reason about
+# than an absolute floor.
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: guest-score-api
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: guest-score-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: marketmate-api
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: marketmate-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: guest-score-scoring
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: guest-score-scoring
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: guest-score-web
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: guest-score-web
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: marketmate-web
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: marketmate-web
+---
+# Postgres is a single writer. minAvailable: 1 on a 1-replica StatefulSet
+# BLOCKS node drains entirely, which is intentional: a drain must be a
+# conscious act ("kubectl delete pdb postgres" or a planned failover), not
+# something a cluster autoscaler does at 3am.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgres
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: elasticsearch
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: elasticsearch
