@@ -83,12 +83,21 @@ in_svc() {
 # ---------------------------------------------------------------------------
 printf '%sdev-stack smoke test%s  (host %s)\n' "$BOLD" "$RESET" "$HOST"
 
+# psql inside the postgres container. initdb runs with
+# --auth-local=scram-sha-256 (docker-compose.yml), so even the Unix-socket
+# connection `compose exec` makes needs the superuser password; without
+# PGPASSWORD psql fails with "fe_sendauth: no password supplied".
+pg_psql() {
+	compose exec -T -e PGPASSWORD="${POSTGRES_PASSWORD:-postgres}" postgres \
+		psql -qtAX -U "${POSTGRES_USER:-postgres}" "$@"
+}
+
 section 'PostgreSQL'
 if running postgres; then
 	for db in "${GS_DB_NAME:-guestscore}" "${MM_DB_NAME:-marketmate}"; do
 		# `SELECT 1` proves the server parses and executes, not merely that the
 		# port is open — pg_isready would pass during recovery.
-		if out="$(in_svc postgres psql -qtAX -U "${POSTGRES_USER:-postgres}" -d "$db" -c 'SELECT 1' 2>&1)" &&
+		if out="$(pg_psql -d "$db" -c 'SELECT 1' 2>&1)" &&
 			[ "$(printf '%s' "$out" | tr -d '[:space:]')" = "1" ]; then
 			pass "postgres: SELECT 1 on database '$db'"
 		else
@@ -98,7 +107,7 @@ if running postgres; then
 
 	# The two roles must actually exist and be able to log in; a database that
 	# exists but whose owner role is missing is a silent init-script failure.
-	if out="$(in_svc postgres psql -qtAX -U "${POSTGRES_USER:-postgres}" -d postgres \
+	if out="$(pg_psql -d "${POSTGRES_DB:-postgres}" \
 		-c "SELECT count(*) FROM pg_roles WHERE rolname IN ('${GS_DB_USER:-guestscore}','${MM_DB_USER:-marketmate}')" 2>&1)" &&
 		[ "$(printf '%s' "$out" | tr -d '[:space:]')" = "2" ]; then
 		pass "postgres: both application roles exist"
@@ -164,14 +173,15 @@ if running mosquitto; then
 	# shellcheck disable=SC2064  # expand tmp now, not at trap time
 	trap "rm -f '$tmp'" EXIT
 
-	# Subscriber first, in the background, so the retained-flag-free publish
-	# below is guaranteed to have a listener. -W 5 bounds the wait; -C 1 exits
-	# after the first message.
+	# Subscriber in the background; -W 5 bounds the wait and -C 1 exits after
+	# the first message. The publish is RETAINED (-r) so the outcome does not
+	# depend on the subscriber's `compose exec` having connected before the
+	# publish lands — a `sleep` there is a race on a loaded CI runner. The
+	# retained message is cleared again below (empty retained payload).
 	( in_svc mosquitto mosquitto_sub -h 127.0.0.1 -p 1883 -t "$topic" -q 1 -C 1 -W 5 >"$tmp" 2>&1 ) &
 	sub_pid=$!
-	sleep 1
 
-	if pub_out="$(in_svc mosquitto mosquitto_pub -h 127.0.0.1 -p 1883 -t "$topic" -q 1 -m "$payload" 2>&1)"; then
+	if pub_out="$(in_svc mosquitto mosquitto_pub -h 127.0.0.1 -p 1883 -t "$topic" -q 1 -r -m "$payload" 2>&1)"; then
 		:
 	else
 		fail "mqtt: publish to $topic" "$pub_out"
@@ -186,6 +196,7 @@ if running mosquitto; then
 	else
 		fail "mqtt: subscriber did not receive the message within 5s" "$(cat "$tmp")"
 	fi
+	in_svc mosquitto mosquitto_pub -h 127.0.0.1 -p 1883 -t "$topic" -r -n >/dev/null 2>&1 || true
 	rm -f "$tmp"
 	trap - EXIT
 else
